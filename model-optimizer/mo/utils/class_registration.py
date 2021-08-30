@@ -325,4 +325,36 @@ def apply_replacements(graph: Graph, replacements_type: list):
     pattern is not applied (while registration it will warn user that we have a conflict).
     """
     replacers_order = get_replacers_order(replacements_type)
+
+    # [Eason] this if section is tflite's model loader
+    if graph.graph['cmd_params'].framework == 'tflite':
+        # tflite_model_file = os.path.join(os.path.abspath(os.getcwd()), "mobilenet_v1_1.0_224.tflite")
+        tflite_model_path = graph.graph['cmd_params'].input_model
+        tflite_model_buf = open(tflite_model_path, "rb").read()
+
+        # Get TFLite model from buffer
+        try:
+            import tflite
+
+            tflite_model = tflite.Model.GetRootAsModel(tflite_model_buf, 0)
+        except AttributeError:
+            import tflite.Model
+
+            tflite_model = tflite.Model.Model.GetRootAsModel(tflite_model_buf, 0)
+
+        
+        from ours.tflite_frontend.tflite_parser import tflite_parser
+        from ours.tflite_frontend.tflite_nx_graph_generator import tflite_nx_graph_generator
+
+        from ours.tflite_frontend.tflite_extractor import tflite_op_extractor
+
+        ordered_ops_list, data_dict, model_input_dict, model_output_dict = tflite_parser(tflite_model)
+
+        graph = tflite_nx_graph_generator(graph, ordered_ops_list, data_dict, model_input_dict, model_output_dict)
+
+
+        from mo.front.extractor import extract_node_attrs
+        graph = extract_node_attrs(graph, lambda node: tflite_op_extractor(node))
+
+
     apply_replacements_list(graph, replacers_order)

@@ -230,6 +230,10 @@ def check_requirements(framework=None):
     :param framework: framework name
     :return: exit code (0 - execution successful, 1 - error)
     """
+    # [Eason] now, if framework is tflite, skip requirements-checking. 
+    if framework == 'tflite':
+        return 0
+
     env_setup = get_environment_setup(framework)
     if framework is None:
         framework_suffix = ""

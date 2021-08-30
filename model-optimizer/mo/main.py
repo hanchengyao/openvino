@@ -92,11 +92,14 @@ def print_argv(argv: argparse.Namespace, is_caffe: bool, is_tf: bool, is_mxnet: 
 
 
 def prepare_ir(argv: argparse.Namespace):
-    is_tf, is_caffe, is_mxnet, is_kaldi, is_onnx = deduce_framework_by_namespace(argv)
+    # [Eason] add tflite to condition
+    # is_tf, is_caffe, is_mxnet, is_kaldi, is_onnx = deduce_framework_by_namespace(argv)
+    is_tf, is_caffe, is_mxnet, is_kaldi, is_onnx, is_tflite = deduce_framework_by_namespace(argv)
 
-    if not any([is_tf, is_caffe, is_mxnet, is_kaldi, is_onnx]):
+    # if not any([is_tf, is_caffe, is_mxnet, is_kaldi, is_onnx]):
+    if not any([is_tf, is_caffe, is_mxnet, is_kaldi, is_onnx, is_tflite]):
         raise Error('Framework {} is not a valid target. Please use --framework with one from the list: caffe, tf, '
-                    'mxnet, kaldi, onnx. ' + refer_to_faq_msg(15), argv.framework)
+                    'mxnet, kaldi, onnx, tflte. ' + refer_to_faq_msg(15), argv.framework)
 
     if is_tf and not argv.input_model and not argv.saved_model_dir and not argv.input_meta_graph:
         raise Error('Path to input model or saved model dir is required: use --input_model, --saved_model_dir or '
@@ -230,6 +233,15 @@ def prepare_ir(argv: argparse.Namespace):
 
     argv.freeze_placeholder_with_value, argv.input = get_freeze_placeholder_values(argv.input,
                                                                                    argv.freeze_placeholder_with_value)
+    
+
+    # [Eason] make our passes visible. This section should be placed before import_extensions
+    import pkgutil
+    import importlib
+    our_passes_dir = os.path.join(os.getcwd(), 'ours', 'passes')
+    for module_loader, name, ispkg in pkgutil.iter_modules([our_passes_dir]):
+        importlib.import_module('{}.{}'.format('ours.passes', name))
+    
     if is_tf:
         from mo.front.tf.register_custom_ops import get_front_classes
         import_extensions.load_dirs(argv.framework, extensions, get_front_classes)
@@ -249,6 +261,14 @@ def prepare_ir(argv: argparse.Namespace):
         send_framework_info('onnx')
         from mo.front.onnx.register_custom_ops import get_front_classes
         import_extensions.load_dirs(argv.framework, extensions, get_front_classes)
+
+    # [Eason] now I don't import LOAD class and framework-specific FRONT class
+    # In the other word, this section's effect is updating _registered_classes_dict with fw-independent front class, and middle and back class.
+    elif is_tflite:
+        # send_framework_info('tflite')
+        from mo.front.tflite.register_custom_ops import get_front_classes
+        import_extensions.load_dirs(argv.framework, extensions, get_front_classes)
+
     graph = unified_pipeline(argv)
     return graph
 
@@ -273,6 +293,8 @@ def emit_ir(graph: Graph, argv: argparse.Namespace):
                     input_names=input_names,
                     meta_info=get_meta_info(argv),
                     use_temporary_path=True)
+        
+
 
     # This graph cleanup is required to avoid double memory consumption
     graph.clear()

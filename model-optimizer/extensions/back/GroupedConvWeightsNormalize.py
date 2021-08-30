@@ -24,7 +24,12 @@ class GroupedConvWeightsNormalize(BackReplacementPattern):
                 ('weights', {'type': 'Const', 'kind': 'op'}),
                 ('weights_data', {'kind': 'data'}),
             ],
-            edges=[('weights', 'weights_data'), ('weights_data', 'conv')]
+            edges=[('weights', 'weights_data'), ('weights_data', 'conv', {'in':1})]  # [Eason]] add the element dict in the end of the last edge tuple to specify that 
+                                                                                     # we are concerning about the edge that connects weight data to conv. 
+                                                                                     # Otherwise it would cause error for tflite.
+                                                                                     # Furthermore, we intend to bypass DecomposeBias pass.
+                                                                                     # If bypassing it, conv will have 3 inputs. This will cause odd behavior of this pass due it 
+                                                                                     # also matches bias data node.
         )
 
     def replace_pattern(self, graph: Graph, match: dict):
