@@ -41,6 +41,7 @@ from mo.utils.telemetry_utils import send_params_info, send_framework_info
 from mo.utils.version import get_version, get_simplified_mo_version, get_simplified_ie_version
 from mo.utils.versions_checker import check_requirements  # pylint: disable=no-name-in-module
 
+from ours.passes.QuantizationInfo import QuantizationInfo
 
 def replace_ext(name: str, old: str, new: str):
     base, ext = os.path.splitext(name)
@@ -278,6 +279,8 @@ def emit_ir(graph: Graph, argv: argparse.Namespace):
     for_graph_and_each_sub_graph_recursively(graph, RemoveConstOps().find_and_replace_pattern)
     for_graph_and_each_sub_graph_recursively(graph, CreateConstNodesReplacement().find_and_replace_pattern)
 
+    for_graph_and_each_sub_graph_recursively(graph, QuantizationInfo().find_and_replace_pattern)
+
     mean_data = deepcopy(graph.graph['mf']) if 'mf' in graph.graph else None
     input_names = deepcopy(graph.graph['input_names']) if 'input_names' in graph.graph else []
 
@@ -302,7 +305,9 @@ def emit_ir(graph: Graph, argv: argparse.Namespace):
                 NormalizeTI().find_and_replace_pattern(op_graph)
                 for_graph_and_each_sub_graph_recursively(op_graph, RemoveConstOps().find_and_replace_pattern)
                 for_graph_and_each_sub_graph_recursively(op_graph, CreateConstNodesReplacement().find_and_replace_pattern)
-                                
+
+                for_graph_and_each_sub_graph_recursively(graph, QuantizationInfo().find_and_replace_pattern)
+
                 mean_data = deepcopy(op_graph.graph['mf']) if 'mf' in op_graph.graph else None
                 input_names = deepcopy(op_graph.graph['input_names']) if 'input_names' in op_graph.graph else []
 
@@ -335,7 +340,9 @@ def emit_ir(graph: Graph, argv: argparse.Namespace):
                 NormalizeTI().find_and_replace_pattern(op_graph)
                 for_graph_and_each_sub_graph_recursively(op_graph, RemoveConstOps().find_and_replace_pattern)
                 for_graph_and_each_sub_graph_recursively(op_graph, CreateConstNodesReplacement().find_and_replace_pattern)
-                                
+
+                for_graph_and_each_sub_graph_recursively(graph, QuantizationInfo().find_and_replace_pattern)
+
                 mean_data = deepcopy(op_graph.graph['mf']) if 'mf' in op_graph.graph else None
                 input_names = deepcopy(op_graph.graph['input_names']) if 'input_names' in op_graph.graph else []
 
