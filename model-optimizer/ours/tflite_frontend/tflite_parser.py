@@ -1,6 +1,7 @@
 import numpy as np
 import os
 import math
+from ours.tflite_frontend.tflite_flexbuffer import FlexBufferDecoder
 
 
 class TensorWrapper(object):
@@ -41,14 +42,40 @@ class ModelOpsAttrsParser(object):
 
 
         self.op_parsers_map = {
+            "ADD": self.add_parser,
+            "AVERAGE_POOL_2D": self.average_pool2d_parser,
+            "CONCATENATION": self.concatenation_parser,
             "CONV_2D": self.conv2d_parser,
             "DEPTHWISE_CONV_2D": self.depthwise_conv2d_parser,
-            "AVERAGE_POOL_2D": self.average_pool2d_parser,
+            "DEQUANTIZE": self.dequantize_parser,
+            "DETECTION_POSTPROCESS": self.detection_postprocess_parser,
+            "FULLY_CONNECTED": self.fully_connected_parser,
+            "LOGISTIC": self.logistic_parser,
             "MAX_POOL_2D": self.max_pool_2d_parser,
+            "QUANTIZE": self.quantize_parser,
             "RESHAPE": self.reshape_parser,
             "SOFTMAX": self.softmax_parser,
-            "FULLY_CONNECTED": self.fully_connected_parser
         }
+
+    def check_unsupported_ops(self):
+        """Check unsupported TFLite ops in our frontend."""
+        unsupported_ops_set = set()
+        for op_idx in range(self.subgraph.OperatorsLength()):
+            op = self.subgraph.Operators(op_idx)
+            op_code_str = self.get_op_code_str(op)
+            if op_code_str not in self.op_parsers_map:
+                unsupported_ops_set.add(op_code_str)
+
+        raise_msg = ""
+
+        if unsupported_ops_set:
+            msg = "The following operators are not supported in frontend " "TFLite: {}\n"
+            ops = str(list(unsupported_ops_set)).strip("[,]")
+            raise_msg += msg.format(ops)
+
+            if len(raise_msg) > 0:
+                raise Exception(raise_msg)
+
 
     def extract_model_ops_and_attrs(self):
         for op_idx in range(self.subgraph.OperatorsLength()):
@@ -286,20 +313,252 @@ class ModelOpsAttrsParser(object):
         dict_to_be_appended['in'] = input_tensors_name_list
         dict_to_be_appended['out'] = output_tensors_name_list
         dict_to_be_appended['temp_inter'] = [id + '_output']  # when handling fused activation, this element will be pop and used.
-        
+        dict_to_be_appended['attrs'] = {}
+
         return dict_to_be_appended
+
+
+    def _convert_elemwise(self, op):
+        """Generic method to Convert TFLite elemwise"""
+        try:
+            from tflite.AddOptions import AddOptions
+            from tflite.SubOptions import SubOptions
+            from tflite.MulOptions import MulOptions
+            from tflite.DivOptions import DivOptions
+            from tflite.BuiltinOptions import BuiltinOptions
+            from tflite.TensorType import TensorType
+        except ImportError:
+            raise ImportError("The tflite package must be installed")
+
+        input_tensors = self.get_input_tensors(op)
+        assert len(input_tensors) == 2, "input tensors length should be 2"
+
+        # [Eason] TODO: handle the case that consts can be operands
+        # now the case that oprands may be const is not handled yet.
+        # so if it is the case, tensor info of the const operand won't be saved in data_dict.
+
+        output_tensors = self.get_output_tensors(op)
+        assert len(output_tensors) == 1, "output tensors length should be 1"
+        output_tensor = output_tensors[0]
+        dict_to_be_appended = self.initialize_op_list_element(op)
+
+        if output_tensor.qnn_params:
+            params = {}
+            params['output_scale'] = output_tensor.qnn_params['scale']
+            params['output_zero_point'] = output_tensor.qnn_params['zero_point']
+            dict_to_be_appended['attrs'] = params
+
+        # Options (fused_activation_function)
+        options = None
+        if op.BuiltinOptionsType() == BuiltinOptions.AddOptions:
+            options = AddOptions()
+        elif op.BuiltinOptionsType() == BuiltinOptions.SubOptions:
+            options = SubOptions()
+        elif op.BuiltinOptionsType() == BuiltinOptions.MulOptions:
+            options = MulOptions()
+        elif op.BuiltinOptionsType() == BuiltinOptions.DivOptions:
+            options = DivOptions()
+
+        if options is not None:
+            op_options = op.BuiltinOptions()
+            options.Init(op_options.Bytes, op_options.Pos)
+            fused_activation_fn = options.FusedActivationFunction()
+
+        # Handle fused activation
+        self.convert_fused_activation_function(fused_activation_fn, dict_to_be_appended)
+
+
+    def add_parser(self, op):
+        self._convert_elemwise(op)
+
 
     def conv2d_parser(self, op):
         self.conv_parser(op, "conv2d")
 
+
+    def concatenation_parser(self, op):
+        try:
+            from tflite.ConcatenationOptions import ConcatenationOptions
+            from tflite.BuiltinOptions import BuiltinOptions
+        except ImportError:
+            raise ImportError("The tflite package must be installed")
+
+        input_tensors = self.get_input_tensors(op)
+        assert len(input_tensors) >= 1, "input tensors should greater than 1"
+
+        output_tensors = self.get_output_tensors(op)
+        assert len(output_tensors) == 1, "output tensors length should be 1"
+        output_tensor = output_tensors[0]
+
+        dict_to_be_appended = self.initialize_op_list_element(op)
+
+        assert op.BuiltinOptionsType() == BuiltinOptions.ConcatenationOptions
+        op_options = op.BuiltinOptions()
+        concatenation_options = ConcatenationOptions()
+        concatenation_options.Init(op_options.Bytes, op_options.Pos)
+        concatenation_axis = concatenation_options.Axis()
+        fused_activation_fn = concatenation_options.FusedActivationFunction()
+
+        params = {'axis': concatenation_axis}
+
+        # handle quantization attrs
+        if output_tensor.qnn_params:
+            params['output_scale'] = output_tensor.qnn_params['scale']
+            params['output_zero_point'] = output_tensor.qnn_params['zero_point']
+
+        dict_to_be_appended['attrs'] = params
+
+        # Handle fused activation
+        self.convert_fused_activation_function(fused_activation_fn, dict_to_be_appended)
+
+
     def depthwise_conv2d_parser(self, op):
         self.conv_parser(op, "depthwise")
+
+
+    def dequantize_parser(self, op):
+        try:
+            from tflite.TensorType import TensorType
+        except ImportError:
+            raise ImportError("The tflite package must be installed")
+
+        input_tensors = self.get_input_tensors(op)
+        assert len(input_tensors) == 1, "input tensors length should be 1"
+        input_tensor = input_tensors[0]
+
+        output_tensors = self.get_output_tensors(op)
+        assert len(output_tensors) == 1, "output_tensors tensors length should be 1"
+        output_tensor = output_tensors[0]
+
+        dict_to_be_appended = self.initialize_op_list_element(op)
+
+        # The input must be quantized
+        assert input_tensor.qnn_params
+
+        output_tensor_np_dtype = self.get_tensor_type_as_numpy(output_tensor)
+
+        params = {
+            'scale': input_tensor.qnn_params['scale'],
+            'zero_point': input_tensor.qnn_params['zero_point'],
+            'output_dtype': output_tensor_np_dtype  # since dtype changes after dequan and quan, 
+                                                    # we can't just set output dtype using the input dtype
+        }
+
+        dict_to_be_appended['attrs'] = params
+        self.ordered_ops_list.append(dict_to_be_appended)
+
+
+    
+    def quantize_parser(self, op):
+        input_tensors = self.get_input_tensors(op)
+        assert len(input_tensors) == 1, "input tensors length should be 1"
+
+        output_tensors = self.get_output_tensors(op)
+        assert len(output_tensors) == 1, "output tensors length should be 1"
+        output_tensor = output_tensors[0]
+        # The output must be quantized
+        assert output_tensor.qnn_params
+
+        dict_to_be_appended = self.initialize_op_list_element(op)
+
+        output_tensor_np_dtype = self.get_tensor_type_as_numpy(output_tensor)
+
+        params = {
+            'scale': output_tensor.qnn_params['scale'],
+            'zero_point': output_tensor.qnn_params['zero_point'],
+            'output_dtype': output_tensor_np_dtype  # since dtype changes after dequan and quan, 
+                                                    # we can't just set output dtype using the input dtype
+        }
+
+        # handle quantization attrs
+        if output_tensor.qnn_params:
+            params['output_scale'] = output_tensor.qnn_params['scale']
+            params['output_zero_point'] = output_tensor.qnn_params['zero_point']
+
+        dict_to_be_appended['attrs'] = params
+        self.ordered_ops_list.append(dict_to_be_appended)
+
+
+
+    def detection_postprocess_parser(self, op):
+        """
+        According to https://github.com/tensorflow/models/blob/master/research/object_detection/export_tflite_ssd_graph_lib.py
+        
+        the meaning of each attr of 'TFLite_Detection_PostProcess' op is as follows:
+
+        max_detections: Maximum number of detections (boxes) to show
+        max_classes_per_detection: Number of classes to display per detection
+        nms_score_threshold: Score threshold used in Non-maximal suppression in post-processing
+        nms_iou_threshold: Intersection-over-union threshold used in Non-maximal suppression in post-processing
+        num_classes: number of classes in SSD detector
+        scale_values: scale values is a dict with following key-value pairs 
+        {y_scale: 10, x_scale: 10, h_scale: 5, w_scale: 5} that are used in decode centersize boxes
+        use_regular_nms: Flag to set postprocessing op to use Regular NMS instead of Fast NMS.
+        detections_per_class: In regular NonMaxSuppression, number of anchors used
+        for NonMaxSuppression per class
+
+        TFLite_Detection_PostProcess custom op node has four outputs:
+
+        detection_boxes: a float32 tensor of shape [1, num_boxes, 4] with box
+        locations
+        detection_classes: a float32 tensor of shape [1, num_boxes]
+        with class indices
+        detection_scores: a float32 tensor of shape [1, num_boxes]
+        with class scores
+        num_boxes: a float32 tensor of size 1 containing the number of detected boxes
+        """
+        
+        flexbuffer = op.CustomOptionsAsNumpy().tobytes()
+        custom_options = FlexBufferDecoder(flexbuffer).decode()
+        # print(custom_options)
+
+        input_tensors = self.get_input_tensors(op)
+        assert len(input_tensors) == 3, "inputs length should be 3"
+        """
+        inputs[0]: location prediction.  shape like [1, 2034, 4] 
+        inputs[1]: class prediction.  shape like [1, 2034, 91] (90+1)
+        inputs[2]: anchor boxes coordinates.   shpae like [2034, 4]
+        """
+
+        output_tensors = self.get_output_tensors(op)  
+        assert len(output_tensors) == 4, "outputs length should be 4 and each output's meaning is specified in the above comment section."  
+        # but the output tensors' shapes are not specified  (4 output tensor shapes are 0) 
+
+        anchor_tensor_value = self.get_tensor_value(input_tensors[2])
+        anchor_tensor_type = self.get_tensor_type_str(input_tensors[2].tensor.Type())
+        anchor_tensor_name = get_tensor_name(self.subgraph, input_tensors[2].tensor_idx)
+
+
+        self.data_dict[anchor_tensor_name] = {'shape':anchor_tensor_value.shape, 'dtype':anchor_tensor_type, 'value':anchor_tensor_value}
+        self.param_value_dict[anchor_tensor_name] = anchor_tensor_value
+
+        dict_to_be_appended = self.initialize_op_list_element(op)
+
+        # take '....tflite' as example in the comments
+        params = {
+            'max_detections': custom_options['max_detections'],  # 10
+            'max_classes_per_detection': custom_options['max_classes_per_detection'],  # 1
+            'nms_score_threshold': custom_options['nms_score_threshold'],  # 0.0
+            'nms_iou_threshold': custom_options['nms_iou_threshold'],  # 0.60
+            'num_classes': custom_options['num_classes'],  # 90
+            'x_scale': custom_options['x_scale'],  # 10.0
+            'y_scale': custom_options['y_scale'],  # 10.0
+            'h_scale': custom_options['h_scale'],  # 5.0
+            'w_scale': custom_options['w_scale'],  # 5.0
+            'use_regular_nms': custom_options['use_regular_nms'],  # 0
+        }
+
+        dict_to_be_appended['attrs'] = params
+
+        self.ordered_ops_list.append(dict_to_be_appended)
+
 
     def average_pool2d_parser(self, op):
         self.pool2d_parser(op, "average")
 
+
     def max_pool_2d_parser(self, op):
-        return {'max_pool_2d': 2}
+        self.pool2d_parser(op, "max")
 
 
     def reshape_parser(self, op):
@@ -314,6 +573,7 @@ class ModelOpsAttrsParser(object):
 
         output_tensors = self.get_output_tensors(op)
         assert len(output_tensors) == 1, "There should be only 1 output tensor"
+        output_tensor = output_tensors[0]
 
 
         if len(input_tensors) == 2:
@@ -342,20 +602,55 @@ class ModelOpsAttrsParser(object):
         reshape_const_name = reshape_node_id + '_const'
         self.data_dict[reshape_const_name] = {'shape': (2,), 'dtype': 'int64', 'value':target_shape}
         self.param_value_dict[reshape_const_name] = target_shape
-        self.ordered_ops_list.append({'id':reshape_node_id, 'tf_op_type':'RESHAPE', 'in':[input_tensor_name, reshape_const_name], 'out':[output_tensor_name], 'attrs':{'target_shape':target_shape}})
 
+
+        params = {}
+        # handle quantization attrs
+        if output_tensor.qnn_params:
+            params['output_scale'] = output_tensor.qnn_params['scale']
+            params['output_zero_point'] = output_tensor.qnn_params['zero_point']
+
+        self.ordered_ops_list.append({'id':reshape_node_id, 'tf_op_type':'RESHAPE', 'in':[input_tensor_name, reshape_const_name], 'out':[output_tensor_name], 'attrs': params}) #'attrs':{'target_shape':target_shape}})
 
 
     def softmax_parser(self, op):
-        """Convert TFLite softmax"""
         input_tensors = self.get_input_tensors(op)
         assert len(input_tensors) == 1, "input tensors length should be 1"
         output_tensors = self.get_output_tensors(op)
         assert len(output_tensors) == 1, "output tensors length should be 1"
+        output_tensor = output_tensors[0]
 
         dict_to_be_appended = self.initialize_op_list_element(op)
 
         params = {"axis": 1}  # 1 is channel
+
+        # handle quantization attrs
+        if output_tensor.qnn_params:
+            params['output_scale'] = output_tensor.qnn_params['scale']
+            params['output_zero_point'] = output_tensor.qnn_params['zero_point']
+
+        dict_to_be_appended['attrs'] = params
+
+        self.ordered_ops_list.append(dict_to_be_appended)
+
+
+    def logistic_parser(self, op):  # sigmoid
+        input_tensors = self.get_input_tensors(op)
+        assert len(input_tensors) == 1, "input tensors length should be 1"
+
+        output_tensors = self.get_output_tensors(op)
+        assert len(output_tensors) == 1, "output tensors length should be 1"
+        output_tensor = output_tensors[0]
+
+        dict_to_be_appended = self.initialize_op_list_element(op)
+
+
+        params = {}
+        # handle quantization attrs
+        if output_tensor.qnn_params:
+            params['output_scale'] = output_tensor.qnn_params['scale']
+            params['output_zero_point'] = output_tensor.qnn_params['zero_point']
+
         dict_to_be_appended['attrs'] = params
 
         self.ordered_ops_list.append(dict_to_be_appended)
@@ -376,6 +671,7 @@ class ModelOpsAttrsParser(object):
 
         output_tensors = self.get_output_tensors(op)
         assert len(output_tensors) == 1, "output tensors should be 1"
+        output_tensor = output_tensors[0]
 
         dict_to_be_appended = self.initialize_op_list_element(op)
 
@@ -409,25 +705,17 @@ class ModelOpsAttrsParser(object):
                 "Padding format {} for operator Pool2D is not supported.".format(padding)
             )
 
-        if pool_type == "average":
-            dict_to_be_appended['attrs'] = params
+        # handle quantization attrs
+        if output_tensor.qnn_params:
+            params['output_scale'] = output_tensor.qnn_params['scale']
+            params['output_zero_point'] = output_tensor.qnn_params['zero_point']
 
-
-        # elif pool_type == "max":
-        #     pass
-        # elif pool_type == "l2":
-        #     pass
-
-        else:
-            raise Exception(
-                "Operator {} is not yet supported for TFLite in our parser.".format(pool_type + " pool")
-            )
+        dict_to_be_appended['attrs'] = params
 
         self.convert_fused_activation_function(fused_activation_fn, dict_to_be_appended)
 
         
     def fully_connected_parser(self, op):
-        """Convert TFLite fully connected"""
         try:
             from tflite.FullyConnectedOptions import FullyConnectedOptions
             from tflite.BuiltinOptions import BuiltinOptions
@@ -443,14 +731,15 @@ class ModelOpsAttrsParser(object):
 
         output_tensors = self.get_output_tensors(op)
         assert len(output_tensors) == 1, "output tensors length should be 1"
+        output_tensor = output_tensors[0]
 
         weight_tensor_shape = to_int_list(self.get_tensor_shape(weight_tensor))
 
         # Weight should have only 2 dimensions(TFLite convention)
         assert len(weight_tensor_shape) == 2, "Weight should be only 2-dim"
 
-        # dict_to_be_appended is used differently from other ops in fc op
-        # it is rather a initializer
+        # dict_to_be_appended for fc would be further modified due to the reshape op introduced by fc op.
+        # that is, we need to reconnect input tensor of fc.
         dict_to_be_appended = self.initialize_op_list_element(op)   
 
         # Input shape: [i_batch_size, ..., n_inputs]
@@ -460,7 +749,6 @@ class ModelOpsAttrsParser(object):
         # Dense expected Input shape: [batch_size, n_units]
         # Dense expected Weight shape: [out_dim, n_units]
         # Dense output shape: [batch_size, out_dim]
-        target_shape = tuple((-1, weight_tensor_shape[1]))
         target_shape = np.array([-1, weight_tensor_shape[1]])
 
         # when encountering fully-connected op, first do things as handling a RESHAPE node, 
@@ -471,10 +759,8 @@ class ModelOpsAttrsParser(object):
         self.data_dict[reshape_const_name] = {'shape': (2,), 'dtype': 'int64', 'value':target_shape}
         self.param_value_dict[reshape_const_name] = target_shape
         fc_reshape_output_name = dict_to_be_appended['id'] + '_reshape_result'
-        self.ordered_ops_list.append({'id':reshape_node_id, 'tf_op_type':'RESHAPE', 'in':[input_tensor_name, reshape_const_name], 'out':[fc_reshape_output_name], 'attrs':{'target_shape':target_shape}})
-        
+        self.ordered_ops_list.append({'id':reshape_node_id, 'tf_op_type':'RESHAPE', 'in':[input_tensor_name, reshape_const_name], 'out':[fc_reshape_output_name], 'attrs':{}})
         dict_to_be_appended['in'] = [fc_reshape_output_name, dict_to_be_appended['in'][1], dict_to_be_appended['in'][2]]
-        dict_to_be_appended['attrs'] = {}
         ### done handling fc's reshape part ###
         
         assert op.BuiltinOptionsType() == BuiltinOptions.FullyConnectedOptions
@@ -493,6 +779,7 @@ class ModelOpsAttrsParser(object):
         self.data_dict[weight_tensor_name] = {'shape':weight_value.shape, 'dtype':weight_tensor_type_str, 'value':weight_value}
         self.param_value_dict[weight_tensor_name] = weight_value
 
+
         # if we have bias
         if len(input_tensors) == 3:
             bias_tensor = input_tensors[2]
@@ -506,21 +793,33 @@ class ModelOpsAttrsParser(object):
             self.param_value_dict[bias_name] = bias_value
             self.data_dict[bias_name] = {'shape': bias_value.shape, 'dtype': bias_tensor_type_str, 'value':bias_value}
 
+        params = {}
+        # handle qunatization attrs
+        if output_tensor.qnn_params:
+            params['output_scale'] = output_tensor.qnn_params['scale']
+            params['output_zero_point'] = output_tensor.qnn_params['zero_point']
+        dict_to_be_appended['attrs'] = params
         # Handle fused activation
         self.convert_fused_activation_function(fused_activation_fn, dict_to_be_appended)
 
 
-
-
-
     def convert_fused_activation_function(self, fused_activation_fn, dict_to_be_appended):
-        """Convert TFLite fused activation function"""
         try:
             from tflite.ActivationFunctionType import ActivationFunctionType
         except ImportError:
             raise ImportError("The tflite package must be installed")
 
         inter_result = dict_to_be_appended.pop('temp_inter')  # a string to connect op and its following activation function  
+
+        # first, propagate quantization info (output tensor scale & zero_point) to the fused act func, so that
+        # if we disable ConvActFuncFusion pass, the input tensor's quantization info, if any, of the op following an
+        # act func can be preserved.
+        quan_info_of_input_op_if_any = {}
+        if 'output_scale' in dict_to_be_appended['attrs'] and 'output_zero_point' in dict_to_be_appended['attrs']:
+            quan_info_of_input_op_if_any = {
+                'output_scale': dict_to_be_appended['attrs']['output_scale'],
+                'output_zero_point': dict_to_be_appended['attrs']['output_zero_point'],
+            }
 
         if fused_activation_fn == ActivationFunctionType.NONE:
             self.ordered_ops_list.append(dict_to_be_appended)
@@ -529,13 +828,13 @@ class ModelOpsAttrsParser(object):
             act_fn_out = dict_to_be_appended['out']
             dict_to_be_appended['out'] = inter_result
             self.ordered_ops_list.append(dict_to_be_appended)
-            self.ordered_ops_list.append({'id':self.unique_id('RELU6'), 'tf_op_type':'RELU6', 'in':inter_result, 'out':act_fn_out, 'attrs':{}})
+            self.ordered_ops_list.append({'id':self.unique_id('RELU6'), 'tf_op_type':'RELU6', 'in':inter_result, 'out':act_fn_out, 'attrs':quan_info_of_input_op_if_any})
         
         if fused_activation_fn == ActivationFunctionType.RELU:
             act_fn_out = dict_to_be_appended['out']
             dict_to_be_appended['out'] = inter_result
             self.ordered_ops_list.append(dict_to_be_appended)
-            self.ordered_ops_list.append({'id':self.unique_id('RELU'), 'tf_op_type':'RELU', 'in':inter_result, 'out':act_fn_out, 'attrs':{}})
+            self.ordered_ops_list.append({'id':self.unique_id('RELU'), 'tf_op_type':'RELU', 'in':inter_result, 'out':act_fn_out, 'attrs':quan_info_of_input_op_if_any})
 
 
     def conv_parser(self, op, conv_type):
@@ -636,31 +935,42 @@ class ModelOpsAttrsParser(object):
             )
 
 
-        dict_to_be_appended['attrs'] = params
-        # now all info needed to generate a node for the op are prepared in the dict. 
-        # we can append this dict to ordered-ops list.
-
-
         # weight tensor type should be INT8/UINT8 (quantization) or FLOAT32
         weight_tensor_type = weight_tensor.tensor.Type()
         assert weight_tensor_type in (TensorType.INT8, TensorType.UINT8, TensorType.FLOAT32)
         weight_tensor_type_str = self.get_tensor_type_str(weight_tensor_type)
 
+        # [Eason] the case that weight is not a const is not handled yet.
         weight_value = self.get_tensor_value(weight_tensor)
 
 
-        # [Mine] fit weight layout to onnx data layout, that is, OIHW
+        # [Eason] fit weight layout to onnx data layout, that is, OIHW
         if is_depthwise_conv:
             weight_value = weight_value.transpose((3, 0, 1, 2))  # [Eason] 08/04 modified due to observing onnx group-conv weight layout
 
         else:
             weight_value = weight_value.transpose((0, 3, 1, 2))
 
-        weight_name = get_tensor_name(self.subgraph, weight_tensor.tensor_idx)
+        weight_name = get_tensor_name(self.subgraph, weight_tensor.tensor_idx)     
+
+        weight_attrs = {
+            'value':weight_value
+        }
+
+        if weight_tensor.qnn_params:
+            # per-channel quantization's scale is a tensor of length=output channel
+            params['weight_scale'] = weight_tensor.qnn_params['scale']
+            params['weight_zero_point'] = weight_tensor.qnn_params['zero_point']
+
+        output_tensor = output_tensors[0]
+        if output_tensor.qnn_params:
+            params['output_scale'] = output_tensor.qnn_params['scale']
+            params['output_zero_point'] = output_tensor.qnn_params['zero_point']
+
+        dict_to_be_appended['attrs'] = params   
 
         self.param_value_dict[weight_name] = weight_value
-        self.data_dict[weight_name] = {'shape': weight_value.shape, 'dtype': weight_tensor_type_str, 'value':weight_value}
-
+        self.data_dict[weight_name] = weight_attrs
 
 
         # if we have bias
@@ -822,7 +1132,11 @@ def tflite_parser(model):
     _shape_dict, _dtype_dict = _input_type(model)  # {'input': (1, 224, 224, 3)} {'input': 'float32'}
 
     
+    # op code in model
     model_ops_attrs_parser = ModelOpsAttrsParser(model, subgraph)
+    model_ops_attrs_parser.check_unsupported_ops()
+    ordered_ops_list, data_dict, param_value_dict = model_ops_attrs_parser.extract_model_ops_and_attrs()
+
 
     # model inputs / outputs
     model_inputs = subgraph.InputsAsNumpy()  # [0]
@@ -834,6 +1148,11 @@ def tflite_parser(model):
         shape = _shape_dict[model_input_name] if model_input_name in _shape_dict else None
         dtype = _dtype_dict[model_input_name] if model_input_name in _dtype_dict else np.float32
         model_input_dict[model_input_name] = {'shape':shape, 'dtype':dtype}
+        # handle quantized inputs
+        model_input_tensor = model_ops_attrs_parser.get_tensors([model_input])
+        if model_input_tensor[0].qnn_params:
+            model_input_dict[model_input_name]['output_scale'] = model_input_tensor[0].qnn_params['scale']
+            model_input_dict[model_input_name]['output_zero_point'] = model_input_tensor[0].qnn_params['zero_point']
 
     model_output_dict = {}
     for model_output in model_outputs:
@@ -841,10 +1160,7 @@ def tflite_parser(model):
         shape = _shape_dict[model_output_name] if model_output_name in _shape_dict else None
         dtype = _dtype_dict[model_output_name] if model_output_name in _dtype_dict else np.float32
         model_output_dict[model_output_name] = {'shape':shape, 'dtype':dtype}
-
-    ordered_ops_list, data_dict, param_value_dict = model_ops_attrs_parser.extract_model_ops_and_attrs()
     
     
     # [Eason] don't need to return param_value_dict as we set params' values as attrs.
     return ordered_ops_list, data_dict, model_input_dict, model_output_dict
-    # return ordered_ops_list, data_dict, param_value_dict, model_input_dict, model_output_dict
