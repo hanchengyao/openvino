@@ -285,16 +285,28 @@ def emit_ir(graph: Graph, argv: argparse.Namespace):
     ie_is_available = argv.ie_is_available
     del argv.ie_is_available
 
-    prepare_emit_ir(graph=graph,
-                    data_type=graph.graph['cmd_params'].data_type,
-                    output_dir=argv.output_dir,
-                    output_model_name=argv.model_name,
-                    mean_data=mean_data,
-                    input_names=input_names,
-                    meta_info=get_meta_info(argv),
-                    use_temporary_path=True)
+    # [Eason] generate intel's ir if condition satisfied
+    if argv.emitter == 1:
+        prepare_emit_ir(graph=graph,
+                        data_type=graph.graph['cmd_params'].data_type,
+                        output_dir=argv.output_dir,
+                        output_model_name=argv.model_name,
+                        mean_data=mean_data,
+                        input_names=input_names,
+                        meta_info=get_meta_info(argv),
+                        use_temporary_path=True)
         
-
+    # [Eason] generate our ir if condition satisfied
+    else:
+        from ours.emitter_v2.prepare_emit_v2_ir import prepare_emit_v2_ir
+        prepare_emit_v2_ir(graph=graph,
+                        data_type=graph.graph['cmd_params'].data_type,
+                        output_dir=argv.output_dir,
+                        output_model_name=argv.model_name,
+                        mean_data=mean_data,
+                        input_names=input_names,
+                        meta_info=get_meta_info(argv),
+                        use_temporary_path=True)
 
     # This graph cleanup is required to avoid double memory consumption
     graph.clear()
@@ -403,6 +415,14 @@ def main(cli_parser: argparse.ArgumentParser, framework: str):
         # Initialize logger with 'ERROR' as default level to be able to form nice messages
         # before arg parser deliver log_level requested by user
         init_logger('ERROR', False)
+
+        # [Eason] add a optional argument '--emitter' to cli_parser to allow us to choose between (1)intel's emitter and (2)our emitter
+        # use emitter 1 by default
+        cli_parser.add_argument("--emitter",
+                                help="choose the version of emitter to be used",
+                                type=int,
+                                choices=[1, 2],
+                                default=1)
 
         argv = cli_parser.parse_args()
         send_params_info(argv, cli_parser)
