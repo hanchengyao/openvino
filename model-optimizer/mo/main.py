@@ -295,6 +295,27 @@ def emit_ir(graph: Graph, argv: argparse.Namespace):
                         input_names=input_names,
                         meta_info=get_meta_info(argv),
                         use_temporary_path=True)
+
+        # [Eason] emit the op graphs' ir (xml+ bin & npy files) if there is any
+        if 'op_graphs_list' in graph.graph:
+            for op_graph in graph.graph['op_graphs_list']:
+                NormalizeTI().find_and_replace_pattern(op_graph)
+                for_graph_and_each_sub_graph_recursively(op_graph, RemoveConstOps().find_and_replace_pattern)
+                for_graph_and_each_sub_graph_recursively(op_graph, CreateConstNodesReplacement().find_and_replace_pattern)
+                                
+                mean_data = deepcopy(op_graph.graph['mf']) if 'mf' in op_graph.graph else None
+                input_names = deepcopy(op_graph.graph['input_names']) if 'input_names' in op_graph.graph else []
+
+                prepare_emit_ir(graph=op_graph,
+                            data_type=op_graph.graph['cmd_params'].data_type,
+                            output_dir=op_graph.graph['cmd_params'].output_dir,
+                            output_model_name=op_graph.graph['cmd_params'].model_name,
+                            mean_data=mean_data,
+                            input_names=list(op_graph.nodes)[0],
+                            meta_info=get_meta_info(argv),
+                            use_temporary_path=False)
+
+                op_graph.clear()
         
     # [Eason] generate our ir if condition satisfied
     else:
@@ -307,6 +328,27 @@ def emit_ir(graph: Graph, argv: argparse.Namespace):
                         input_names=input_names,
                         meta_info=get_meta_info(argv),
                         use_temporary_path=True)
+
+        # [Eason] emit the op graphs' ir (xml+ bin & npy files) if there is any
+        if 'op_graphs_list' in graph.graph:
+            for op_graph in graph.graph['op_graphs_list']:
+                NormalizeTI().find_and_replace_pattern(op_graph)
+                for_graph_and_each_sub_graph_recursively(op_graph, RemoveConstOps().find_and_replace_pattern)
+                for_graph_and_each_sub_graph_recursively(op_graph, CreateConstNodesReplacement().find_and_replace_pattern)
+                                
+                mean_data = deepcopy(op_graph.graph['mf']) if 'mf' in op_graph.graph else None
+                input_names = deepcopy(op_graph.graph['input_names']) if 'input_names' in op_graph.graph else []
+
+                prepare_emit_v2_ir(graph=op_graph,
+                            data_type=op_graph.graph['cmd_params'].data_type,
+                            output_dir=op_graph.graph['cmd_params'].output_dir,
+                            output_model_name=op_graph.graph['cmd_params'].model_name,
+                            mean_data=mean_data,
+                            input_names=list(op_graph.nodes)[0],
+                            meta_info=get_meta_info(argv),
+                            use_temporary_path=False)
+
+                op_graph.clear()
 
     # This graph cleanup is required to avoid double memory consumption
     graph.clear()
