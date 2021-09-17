@@ -208,7 +208,6 @@ def prepare_emit_v2_ir(graph: Graph, data_type: str, output_dir: str, output_mod
     # do not run the type inference in sub-graphs. It will be called automatically as part of the type inference of
     # the TensorIterator nodes
 
-    type_infer(graph)  # [Eason] comment this line and do type infer as a pass to avoid error when emitting ir for op graphs
     
     RemoveUselessConvert().find_and_replace_pattern(graph)
 
