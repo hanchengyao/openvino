@@ -21,7 +21,7 @@ def tflite_nx_graph_generator(graph, ordered_ops_list, data_dict, model_input_di
     Construct nx graph structure for tflite model
     '''
 
-    graph.__setattr__('name', 'tflite_model')
+    graph.__setattr__('name', graph.graph['cmd_params'].model_name)
     graph.graph['layout'] = 'NCHW'
     graph.graph['fw'] = 'tflite'
     graph.graph['feature_dim'] = 1
